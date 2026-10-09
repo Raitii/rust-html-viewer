@@ -9,6 +9,7 @@
 <body>
 <header id="bar">
   <div class="files">
+    <button id="btn-open" class="icon" title="比較するファイルを選ぶ (o)">📂</button>
     <span class="file old" id="old-name">旧</span>
     <span class="arrow">→</span>
     <span class="file new" id="new-name">新</span>
@@ -31,10 +32,14 @@
     <label title="対応する要素を基準に左右を同期スクロール (s)"><input type="checkbox" id="opt-sync"> 同期</label>
     <label title="ファイル保存時に編集箇所へ自動で移動 (f)"><input type="checkbox" id="opt-follow"> 編集に追従</label>
     <label title="ページ内の JavaScript を実行"><input type="checkbox" id="opt-js"> JS</label>
+    <button id="btn-list" class="icon" title="変更一覧の表示/非表示 (l)">☰ 一覧</button>
+    <button id="btn-help" class="icon" title="キー操作 (?)">?</button>
     <span class="live" id="live" title="ファイル監視中">● LIVE</span>
   </div>
 </header>
 
+<div id="body">
+<aside id="changes" aria-label="変更一覧"></aside>
 <main id="main">
   <section id="render">
     <div class="pane" id="pane-old">
@@ -57,17 +62,65 @@
     <div id="rail"></div>
   </section>
 </main>
+</div>
 
 <footer id="keys">
   <span><kbd>j</kbd><kbd>k</kbd> 変更を移動</span>
   <span><kbd>v</kbd> 並列/重ね</span>
   <span><kbd>Space</kbd> 長押しで旧を表示（重ね）</span>
-  <span>要素クリック → ソースへ</span>
-  <span>ソース行クリック → 描画へ</span>
+  <span><kbd>l</kbd> 変更一覧</span>
+  <span><kbd>o</kbd> ファイル選択</span>
+  <span><kbd>?</kbd> キー操作一覧</span>
   <span id="toast"></span>
 </footer>
 
 <div id="error" hidden></div>
+
+<div class="modal" id="help" hidden>
+  <div class="card" role="dialog" aria-label="キー操作">
+    <h2>キー操作 <button class="close" data-close>✕</button></h2>
+    <table>
+      <tr><td><kbd>j</kbd> <kbd>n</kbd> <kbd>F7</kbd></td><td>次の変更</td></tr>
+      <tr><td><kbd>k</kbd> <kbd>p</kbd> <kbd>Shift+F7</kbd></td><td>前の変更</td></tr>
+      <tr><td><kbd>l</kbd></td><td>変更一覧の表示/非表示</td></tr>
+      <tr><td><kbd>v</kbd></td><td>並列 ⇄ 重ね</td></tr>
+      <tr><td><kbd>Space</kbd>（長押し）</td><td>重ね表示で旧を表示</td></tr>
+      <tr><td><kbd>w</kbd></td><td>空白の違いを無視</td></tr>
+      <tr><td><kbd>s</kbd></td><td>同期スクロール ON/OFF</td></tr>
+      <tr><td><kbd>f</kbd></td><td>編集への追従 ON/OFF</td></tr>
+      <tr><td><kbd>o</kbd></td><td>比較するファイルを選ぶ</td></tr>
+      <tr><td><kbd>?</kbd></td><td>このヘルプ</td></tr>
+      <tr><td><kbd>Esc</kbd></td><td>閉じる</td></tr>
+    </table>
+    <p class="hint">描画の要素をクリックでソースの該当行へ、ソース行をクリックで描画のその要素へ移動します。</p>
+  </div>
+</div>
+
+<div class="modal" id="picker" hidden>
+  <div class="card wide" role="dialog" aria-label="ファイルを選ぶ">
+    <h2>比較するファイルを選ぶ <button class="close" data-close>✕</button></h2>
+    <div class="fields">
+      <label class="field old"><span>旧</span><input id="path-old" spellcheck="false" placeholder="パスを貼り付け、または下の一覧から選択"></label>
+      <label class="field new"><span>新</span><input id="path-new" spellcheck="false" placeholder="パスを貼り付け、または下の一覧から選択"></label>
+    </div>
+    <div class="browse">
+      <div class="browse-bar">
+        <button id="ls-up" title="上のフォルダ">↑</button>
+        <input id="ls-dir" spellcheck="false" title="フォルダのパス（Enter で移動）">
+        <span class="target">選んだファイルの入力先:
+          <label><input type="radio" name="target" value="old" checked> 旧</label>
+          <label><input type="radio" name="target" value="new"> 新</label>
+        </span>
+      </div>
+      <ul id="ls-list"></ul>
+    </div>
+    <div class="actions">
+      <span id="picker-error" class="perr"></span>
+      <button id="picker-cancel" data-close>キャンセル</button>
+      <button id="picker-go" class="primary">比較する</button>
+    </div>
+  </div>
+</div>
 <script src="/app.js"></script>
 </body>
 </html>
