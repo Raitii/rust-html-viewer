@@ -6,15 +6,17 @@ use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use std::{env, fs, process, thread};
 
+use serde::Deserialize;
 use serde_json::json;
-use tiny_http::{Header, Request, Response, Server};
+use tiny_http::{Header, Method, Request, Response, Server};
 
 const INDEX_HTML: &str = include_str!("../assets/index.html");
 const APP_JS: &str = include_str!("../assets/app.js");
 const APP_CSS: &str = include_str!("../assets/app.css");
 
 const USAGE: &str = "\
-使い方: rust-html-viewer <旧.html> <新.html> [オプション]
+使い方: rust-html-viewer [<旧.html> <新.html>] [オプション]
+  ファイルを省略すると、ブラウザの画面で選べます。
 
 オプション:
   -p, --port <N>   待ち受けポート（既定: 7878、使用中なら空きポート）
@@ -58,30 +60,62 @@ impl Side {
 
 type Stamp = Option<(SystemTime, u64)>;
 
-struct App {
+/// 比較している旧・新のペア。
+struct Pair {
     old: Side,
     new: Side,
-    watch: Mutex<((Stamp, Stamp), u64)>,
 }
 
-impl App {
-    /// どちらかのファイルが更新されるたびに増える番号。
-    fn version(&self) -> u64 {
-        let now = (self.old.stamp(), self.new.stamp());
-        let mut w = self.watch.lock().unwrap();
-        if w.0 != now {
-            w.0 = now;
-            w.1 += 1;
-        }
-        w.1
-    }
-
+impl Pair {
     fn side(&self, name: &str) -> Option<&Side> {
         match name {
             "old" => Some(&self.old),
             "new" => Some(&self.new),
             _ => None,
         }
+    }
+}
+
+struct State {
+    pair: Option<Arc<Pair>>,
+    stamp: (Stamp, Stamp),
+    version: u64,
+}
+
+struct App {
+    state: Mutex<State>,
+}
+
+impl App {
+    fn new(pair: Option<Pair>) -> Self {
+        let stamp = pair.as_ref().map_or((None, None), |p| (p.old.stamp(), p.new.stamp()));
+        App {
+            state: Mutex::new(State { pair: pair.map(Arc::new), stamp, version: 0 }),
+        }
+    }
+
+    fn pair(&self) -> Option<Arc<Pair>> {
+        self.state.lock().unwrap().pair.clone()
+    }
+
+    /// 比較対象を差し替える、またはどちらかのファイルが更新されるたびに増える番号。
+    fn version(&self) -> u64 {
+        let mut st = self.state.lock().unwrap();
+        if let Some(p) = &st.pair {
+            let now = (p.old.stamp(), p.new.stamp());
+            if st.stamp != now {
+                st.stamp = now;
+                st.version += 1;
+            }
+        }
+        st.version
+    }
+
+    fn set_pair(&self, pair: Pair) {
+        let mut st = self.state.lock().unwrap();
+        st.stamp = (pair.old.stamp(), pair.new.stamp());
+        st.pair = Some(Arc::new(pair));
+        st.version += 1;
     }
 }
 
@@ -106,12 +140,13 @@ fn main() {
             _ => files.push(a),
         }
     }
-    if files.len() != 2 {
-        fail(USAGE);
-    }
-    let (old, new) = match (Side::new(&files[0]), Side::new(&files[1])) {
-        (Ok(o), Ok(n)) => (o, n),
-        (Err(e), _) | (_, Err(e)) => fail(&e),
+    let pair = match files.len() {
+        0 => None,
+        2 => match (Side::new(&files[0]), Side::new(&files[1])) {
+            (Ok(old), Ok(new)) => Some(Pair { old, new }),
+            (Err(e), _) | (_, Err(e)) => fail(&e),
+        },
+        _ => fail(USAGE),
     };
 
     let server = match port {
@@ -122,16 +157,15 @@ fn main() {
     let addr = server.server_addr().to_ip().expect("TCP address");
     let url = format!("http://{addr}/");
 
-    println!("旧: {}", old.display_path());
-    println!("新: {}", new.display_path());
+    if let Some(p) = &pair {
+        println!("旧: {}", p.old.display_path());
+        println!("新: {}", p.new.display_path());
+    } else {
+        println!("ブラウザの画面で比較するファイルを選びます。");
+    }
     println!("\n  {url}\n\nファイルを保存すると自動で更新されます。Ctrl+C で終了。");
 
-    let app = Arc::new(App {
-        old,
-        new,
-        watch: Mutex::new(((None, None), 0)),
-    });
-    app.version();
+    let app = Arc::new(App::new(pair));
 
     if open {
         open_browser(&url);
@@ -196,7 +230,30 @@ fn respond_json(req: Request, status: u16, value: serde_json::Value) {
     );
 }
 
-fn handle(app: &App, req: Request) {
+/// DNS リバインディング対策: Host がローカルのものでなければ API を使わせない。
+fn host_is_local(req: &Request) -> bool {
+    req.headers()
+        .iter()
+        .find(|h| h.field.equiv("Host"))
+        .is_some_and(|h| {
+            let v = h.value.as_str();
+            let host = v.rsplit_once(':').map_or(v, |(h, _)| h);
+            matches!(host, "127.0.0.1" | "localhost")
+        })
+}
+
+fn clean_path(s: &str) -> &str {
+    // エクスプローラの「パスのコピー」は前後に " が付く
+    s.trim().trim_matches('"').trim()
+}
+
+#[derive(Deserialize)]
+struct OpenBody {
+    old: String,
+    new: String,
+}
+
+fn handle(app: &App, mut req: Request) {
     let raw = req.url().to_owned();
     let (path, query) = raw.split_once('?').unwrap_or((&raw, ""));
     let param = |k: &str| {
@@ -207,6 +264,10 @@ fn handle(app: &App, req: Request) {
             .map(|(_, v)| v.to_owned())
     };
 
+    if path.starts_with("/api/") && !host_is_local(&req) {
+        return respond_json(req, 403, json!({ "error": "forbidden" }));
+    }
+
     match path {
         "/" => respond(req, 200, "text/html; charset=utf-8", INDEX_HTML.into(), vec![]),
         "/app.js" => respond(req, 200, "text/javascript; charset=utf-8", APP_JS.into(), vec![]),
@@ -214,9 +275,12 @@ fn handle(app: &App, req: Request) {
         "/api/version" => respond_json(req, 200, json!({ "version": app.version() })),
         "/api/diff" => {
             let version = app.version();
+            let Some(pair) = app.pair() else {
+                return respond_json(req, 200, json!({ "version": version, "empty": true }));
+            };
             let ignore_ws = param("ws").as_deref() == Some("1");
             let meta = |s: &Side| json!({ "name": s.name, "path": s.display_path() });
-            match (app.old.read(), app.new.read()) {
+            match (pair.old.read(), pair.new.read()) {
                 (Ok(o), Ok(n)) => {
                     let d = diff::diff_sources(&o, &n, ignore_ws);
                     respond_json(
@@ -224,8 +288,8 @@ fn handle(app: &App, req: Request) {
                         200,
                         json!({
                             "version": version,
-                            "old": meta(&app.old),
-                            "new": meta(&app.new),
+                            "old": meta(&pair.old),
+                            "new": meta(&pair.new),
                             "diff": d,
                         }),
                     );
@@ -233,10 +297,37 @@ fn handle(app: &App, req: Request) {
                 (Err(e), _) | (_, Err(e)) => respond_json(req, 500, json!({ "error": e })),
             }
         }
+        "/api/open" => {
+            if req.method() != &Method::Post {
+                return respond_json(req, 405, json!({ "error": "POST only" }));
+            }
+            let body: Result<OpenBody, _> = serde_json::from_reader(req.as_reader());
+            let result = body.map_err(|e| e.to_string()).and_then(|b| {
+                Ok(Pair {
+                    old: Side::new(clean_path(&b.old))?,
+                    new: Side::new(clean_path(&b.new))?,
+                })
+            });
+            match result {
+                Ok(pair) => {
+                    app.set_pair(pair);
+                    respond_json(req, 200, json!({ "ok": true }));
+                }
+                Err(e) => respond_json(req, 400, json!({ "error": e })),
+            }
+        }
+        "/api/ls" => {
+            let dir = param("dir").map(|d| percent_decode(&d)).unwrap_or_default();
+            match list_dir(clean_path(&dir)) {
+                Ok(v) => respond_json(req, 200, v),
+                Err(e) => respond_json(req, 400, json!({ "error": e })),
+            }
+        }
         _ => {
             if let Some(rest) = path.strip_prefix("/doc/")
                 && let Some((side, rel)) = rest.split_once('/')
-                && let Some(side) = app.side(side)
+                && let Some(pair) = app.pair()
+                && let Some(side) = pair.side(side)
             {
                 serve_doc(side, &percent_decode(rel), param("js").as_deref() == Some("1"), req);
             } else {
@@ -244,6 +335,46 @@ fn handle(app: &App, req: Request) {
             }
         }
     }
+}
+
+/// フォルダの中身（サブフォルダと HTML ファイル）を返す。ファイル選択画面用。
+fn list_dir(dir: &str) -> Result<serde_json::Value, String> {
+    let base = if dir.is_empty() {
+        env::current_dir().map_err(|e| e.to_string())?
+    } else {
+        PathBuf::from(dir)
+    };
+    let base = fs::canonicalize(&base).map_err(|e| format!("{}: {e}", base.display()))?;
+    if !base.is_dir() {
+        return Err(format!("{}: フォルダではありません", base.display()));
+    }
+    let mut entries: Vec<(bool, String)> = fs::read_dir(&base)
+        .map_err(|e| format!("{}: {e}", base.display()))?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with('.') {
+                return None;
+            }
+            let is_dir = e.path().is_dir();
+            let lower = name.to_ascii_lowercase();
+            (is_dir || lower.ends_with(".html") || lower.ends_with(".htm")).then_some((is_dir, name))
+        })
+        .collect();
+    // フォルダを先に、あとは名前順
+    entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    let show = |p: &Path| {
+        let s = p.display().to_string();
+        s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s)
+    };
+    Ok(json!({
+        "dir": show(&base),
+        "parent": base.parent().map(show),
+        "entries": entries
+            .into_iter()
+            .map(|(d, n)| json!({ "name": n, "dir": d }))
+            .collect::<Vec<_>>(),
+    }))
 }
 
 /// 比較対象の HTML 本体（行番号を埋め込む）と、同じフォルダにある CSS・画像などを返す。

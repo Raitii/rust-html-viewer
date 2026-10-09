@@ -29,6 +29,7 @@ const S = {
   sync: store.get('sync', true),
   follow: store.get('follow', true),
   js: store.get('js', false),
+  list: store.get('list', true),
   expanded: new Set(),    // 展開済みの折りたたみ
   items: [],              // 描画上の変更要素
   itemByEl: new Map(),
@@ -48,6 +49,7 @@ const els = {
   rows: $('#rows'),
   srcScroll: $('#source-scroll'),
   rail: $('#rail'),
+  changes: $('#changes'),
   counter: $('#counter'),
   note: $('#hunk-note'),
   stats: $('#stats'),
@@ -125,10 +127,24 @@ async function reload(reason) {
   S.loading = true;
   try {
     const data = await fetchDiff();
+    if (data.empty) {
+      // まだ比較するファイルが選ばれていない
+      S.data = null;
+      S.version = data.version;
+      S.prevText = null;
+      els.counter.textContent = '–';
+      els.note.textContent = '比較するファイルが未選択です（📂 か o キーで選択）';
+      els.stats.textContent = '';
+      els.changes.innerHTML = els.rows.innerHTML = els.rail.innerHTML = '';
+      hideError();
+      if (reason === 'init') openPicker();
+      return;
+    }
+    const fresh = reason === 'open';   // 別のファイルに切り替えた直後はスクロール位置を引き継がない
     const keep = {
-      old: panes.old.win ? panes.old.win.scrollY : 0,
-      new: panes.new.win ? panes.new.win.scrollY : 0,
-      src: els.srcScroll.scrollTop,
+      old: !fresh && panes.old.win ? panes.old.win.scrollY : 0,
+      new: !fresh && panes.new.win ? panes.new.win.scrollY : 0,
+      src: fresh ? 0 : els.srcScroll.scrollTop,
     };
     const framesStale = data.version !== S.version || reason === 'js' || !panes.new.doc;
     const prevText = S.prevText;
@@ -147,11 +163,12 @@ async function reload(reason) {
     analyze();
     renderHeader();
     renderSource();
+    renderChanges();
     els.srcScroll.scrollTop = keep.src;
     S.prevText = textSnapshot();
 
     const n = data.diff.hunks.length;
-    if (reason === 'init') {
+    if (reason === 'init' || reason === 'open') {
       focusHunk(n ? 0 : -1);
     } else if (reason === 'file' && S.follow && prevText) {
       const edit = firstEdit(prevText, S.prevText);
@@ -519,6 +536,7 @@ function focusHunk(k, { scroll = true, from = null } = {}) {
 
   for (const r of els.rows.querySelectorAll('.row.cur')) r.classList.remove('cur');
   for (const t of els.rail.querySelectorAll('.tick.cur')) t.classList.remove('cur');
+  for (const c of els.changes.querySelectorAll('.chg.cur')) c.classList.remove('cur');
   for (const it of S.items) {
     if (!it.box) continue;
     it.box.classList.toggle('cur', it.hunk === k);
@@ -529,6 +547,8 @@ function focusHunk(k, { scroll = true, from = null } = {}) {
   for (const r of els.rows.querySelectorAll(`.row[data-h="${k}"]`)) r.classList.add('cur');
   const tick = els.rail.querySelector(`.tick[data-h="${k}"]`);
   if (tick) tick.classList.add('cur');
+  const chg = els.changes.querySelector(`.chg[data-h="${k}"]`);
+  if (chg) { chg.classList.add('cur'); chg.scrollIntoView({ block: 'nearest' }); }
 
   const h = hunks[k];
   const items = S.hunkItems[k] || [];
@@ -652,6 +672,133 @@ function buildRail() {
 }
 
 // ---------------------------------------------------------------------
+//  変更一覧（サイドバー）
+// ---------------------------------------------------------------------
+
+function renderChanges() {
+  const { lines, hunks } = S.data.diff;
+  if (!hunks.length) { els.changes.innerHTML = '<div class="none">差分はありません</div>'; return; }
+  const ins = [], del = [];
+  for (const l of lines) {
+    if (l.h == null) continue;
+    const t = lineText(l).trim();
+    if (l.k === 'i' && ins[l.h] === undefined && t) ins[l.h] = t;
+    if (l.k === 'd' && del[l.h] === undefined && t) del[l.h] = t;
+  }
+  els.changes.innerHTML = hunks.map((h, k) => {
+    const kind = h.o[1] && h.n[1] ? 'mod' : h.n[1] ? 'add' : 'del';
+    const mark = { add: '+', del: '−', mod: '~' }[kind];
+    const text = ins[k] ?? del[k] ?? '（空白行）';
+    const at = h.n[1] ? `L${h.n[0]}` : `旧${h.o[0]}`;
+    return `<button class="chg ${kind}" data-h="${k}" title="${esc(text)}&#10;+${h.n[1]} −${h.o[1]} 行">`
+      + `<span class="no">${k + 1}</span><span class="kind">${mark}</span>`
+      + `<span class="txt">${esc(text)}</span><span class="ln">${at}</span></button>`;
+  }).join('');
+}
+
+els.changes.addEventListener('click', (e) => {
+  const c = e.target.closest('.chg');
+  if (c) focusHunk(+c.dataset.h);
+});
+
+function setList(on) {
+  S.list = on;
+  store.set('list', on);
+  document.body.classList.toggle('no-list', !on);
+  $('#btn-list').classList.toggle('on', on);
+  requestAnimationFrame(() => { scheduleDraw(); if (S.data) buildRail(); });
+}
+$('#btn-list').addEventListener('click', () => setList(!S.list));
+
+// ---------------------------------------------------------------------
+//  ヘルプ・ファイル選択
+// ---------------------------------------------------------------------
+
+const modals = { help: $('#help'), picker: $('#picker') };
+const anyModal = () => Object.values(modals).some((m) => !m.hidden);
+function closeModals() { for (const m of Object.values(modals)) m.hidden = true; }
+for (const m of Object.values(modals)) {
+  m.addEventListener('mousedown', (e) => { if (e.target === m) m.hidden = true; });
+  for (const b of m.querySelectorAll('[data-close]')) b.addEventListener('click', () => { m.hidden = true; });
+}
+$('#btn-help').addEventListener('click', () => { modals.help.hidden = !modals.help.hidden; });
+$('#btn-open').addEventListener('click', () => openPicker());
+
+const pk = {
+  old: $('#path-old'), new: $('#path-new'),
+  dir: $('#ls-dir'), list: $('#ls-list'), err: $('#picker-error'),
+  parent: null, sep: '/',
+};
+const dirOf = (p) => (p || '').replace(/[\\/][^\\/]*$/, '');
+
+function openPicker() {
+  modals.help.hidden = true;
+  modals.picker.hidden = false;
+  pk.err.textContent = '';
+  if (S.data) { pk.old.value = S.data.old.path; pk.new.value = S.data.new.path; }
+  loadDir(dirOf(pk.old.value || pk.new.value));
+  (pk.old.value ? pk.new : pk.old).focus();
+}
+
+async function loadDir(dir) {
+  try {
+    const r = await fetch('/api/ls?dir=' + encodeURIComponent(dir));
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+    pk.dir.value = j.dir;
+    pk.parent = j.parent;
+    pk.sep = j.dir.includes('\\') ? '\\' : '/';
+    pk.err.textContent = '';
+    pk.list.innerHTML = j.entries.length
+      ? j.entries.map((e) => `<li class="${e.dir ? 'dir' : 'file'}" data-name="${esc(e.name)}">${esc(e.name)}</li>`).join('')
+      : '<li class="msg">フォルダも HTML ファイルもありません</li>';
+  } catch (e) {
+    pk.err.textContent = e.message || String(e);
+  }
+}
+
+const joinPath = (dir, name) => (dir.endsWith(pk.sep) ? dir + name : dir + pk.sep + name);
+
+pk.list.addEventListener('click', (e) => {
+  const li = e.target.closest('li[data-name]');
+  if (!li) return;
+  const full = joinPath(pk.dir.value, li.dataset.name);
+  if (li.classList.contains('dir')) { loadDir(full); return; }
+  const target = document.querySelector('input[name=target]:checked').value;
+  pk[target].value = full;
+  // 旧を入れたら次は新、というふうに入力先を進める
+  if (target === 'old') document.querySelector('input[name=target][value=new]').checked = true;
+});
+$('#ls-up').addEventListener('click', () => { if (pk.parent) loadDir(pk.parent); });
+pk.dir.addEventListener('keydown', (e) => { if (e.key === 'Enter') loadDir(pk.dir.value); });
+for (const k of ['old', 'new']) {
+  pk[k].addEventListener('keydown', (e) => { if (e.key === 'Enter') submitPicker(); });
+  pk[k].addEventListener('focus', () => { document.querySelector(`input[name=target][value=${k}]`).checked = true; });
+}
+$('#picker-go').addEventListener('click', submitPicker);
+
+async function submitPicker() {
+  pk.err.textContent = '';
+  try {
+    const r = await fetch('/api/open', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old: pk.old.value, new: pk.new.value }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error || r.statusText);
+  } catch (e) {
+    pk.err.textContent = e.message || String(e);
+    return;
+  }
+  modals.picker.hidden = true;
+  S.expanded = new Set();
+  S.cur = -1;
+  S.prevText = null;
+  await reload('open');
+}
+
+// ---------------------------------------------------------------------
 //  操作
 // ---------------------------------------------------------------------
 
@@ -760,6 +907,8 @@ function setPeek(on) {
 function onKeyDown(e) {
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const t = e.target;
+  if (e.key === 'Escape' && anyModal()) { closeModals(); e.preventDefault(); return; }
+  if (anyModal()) return;
   if (t && t.ownerDocument === document && t.matches && t.matches('input:not([type=checkbox]), textarea, select')) return;
   switch (e.key) {
     case 'j': case 'n': case 'F7':
@@ -770,6 +919,9 @@ function onKeyDown(e) {
     case 'w': flip('ws'); break;
     case 's': flip('sync'); break;
     case 'f': flip('follow'); break;
+    case 'l': setList(!S.list); break;
+    case 'o': openPicker(); break;
+    case '?': modals.help.hidden = false; break;
     case ' ':
       if (S.mode !== 'single') return;
       if (!e.repeat) setPeek(true);
@@ -867,4 +1019,5 @@ async function poll() {
 }
 
 setMode(S.mode);
+setList(S.list);
 reload('init').then(() => setTimeout(poll, 700));
