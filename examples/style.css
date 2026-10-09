@@ -1,0 +1,6 @@
+body { font-family: system-ui, sans-serif; margin: 0; color: #222; }
+header { background: #2b3a55; color: #fff; padding: 24px 32px; }
+main { padding: 16px 32px; max-width: 760px; }
+.card { border: 1px solid #ddd; border-radius: 8px; padding: 12px 16px; margin: 12px 0; }
+.price { font-size: 1.4em; font-weight: bold; color: #c0392b; }
+.badge { background: #f1c40f; padding: 2px 8px; border-radius: 10px; font-size: .8em; }

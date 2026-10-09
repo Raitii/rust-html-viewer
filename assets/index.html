@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HTML Diff Viewer</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<header id="bar">
+  <div class="files">
+    <span class="file old" id="old-name">旧</span>
+    <span class="arrow">→</span>
+    <span class="file new" id="new-name">新</span>
+    <span class="stats" id="stats"></span>
+  </div>
+
+  <div class="nav">
+    <button id="prev" title="前の変更 (k / p)">▲</button>
+    <span id="counter">–</span>
+    <button id="next" title="次の変更 (j / n)">▼</button>
+    <span class="note" id="hunk-note"></span>
+  </div>
+
+  <div class="opts">
+    <div class="seg" role="group" aria-label="表示">
+      <button data-mode="split" title="左右に並べる (v)">並列</button>
+      <button data-mode="single" title="新だけを表示。Space 長押しで旧に切替 (v)">重ねる</button>
+    </div>
+    <label title="空白・インデントの違いを無視 (w)"><input type="checkbox" id="opt-ws"> 空白無視</label>
+    <label title="対応する要素を基準に左右を同期スクロール (s)"><input type="checkbox" id="opt-sync"> 同期</label>
+    <label title="ファイル保存時に編集箇所へ自動で移動 (f)"><input type="checkbox" id="opt-follow"> 編集に追従</label>
+    <label title="ページ内の JavaScript を実行"><input type="checkbox" id="opt-js"> JS</label>
+    <span class="live" id="live" title="ファイル監視中">● LIVE</span>
+  </div>
+</header>
+
+<main id="main">
+  <section id="render">
+    <div class="pane" id="pane-old">
+      <div class="pane-label">旧</div>
+      <iframe title="旧"></iframe>
+      <div class="overlay"></div>
+    </div>
+    <div class="pane" id="pane-new">
+      <div class="pane-label">新</div>
+      <iframe title="新"></iframe>
+      <div class="overlay"></div>
+    </div>
+    <div id="peek-hint">Space 長押しで旧を表示</div>
+  </section>
+
+  <div id="splitter" title="ドラッグで高さ調整"></div>
+
+  <section id="source">
+    <div id="source-scroll"><div id="rows"></div></div>
+    <div id="rail"></div>
+  </section>
+</main>
+
+<footer id="keys">
+  <span><kbd>j</kbd><kbd>k</kbd> 変更を移動</span>
+  <span><kbd>v</kbd> 並列/重ね</span>
+  <span><kbd>Space</kbd> 長押しで旧を表示（重ね）</span>
+  <span>要素クリック → ソースへ</span>
+  <span>ソース行クリック → 描画へ</span>
+  <span id="toast"></span>
+</footer>
+
+<div id="error" hidden></div>
+<script src="/app.js"></script>
+</body>
+</html>
