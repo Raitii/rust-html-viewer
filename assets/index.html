@@ -31,7 +31,7 @@
     <label title="空白・インデントの違いを無視 (w)"><input type="checkbox" id="opt-ws"> 空白無視</label>
     <label title="対応する要素を基準に左右を同期スクロール (s)"><input type="checkbox" id="opt-sync"> 同期</label>
     <label title="ファイル保存時に編集箇所へ自動で移動 (f)"><input type="checkbox" id="opt-follow"> 編集に追従</label>
-    <label title="ページ内の JavaScript を実行"><input type="checkbox" id="opt-js"> JS</label>
+    <label title="隔離してJavaScriptを実行。DOM比較と描画側の連動は無効"><input type="checkbox" id="opt-js"> JS</label>
     <button id="btn-list" class="icon" title="変更一覧の表示/非表示 (l)">☰ 一覧</button>
     <button id="btn-help" class="icon" title="キー操作 (?)">?</button>
     <span class="live" id="live" title="ファイル監視中">● LIVE</span>
@@ -44,12 +44,12 @@
   <section id="render">
     <div class="pane" id="pane-old">
       <div class="pane-label">旧</div>
-      <iframe title="旧"></iframe>
+      <iframe title="旧" sandbox="allow-same-origin"></iframe>
       <div class="overlay"></div>
     </div>
     <div class="pane" id="pane-new">
       <div class="pane-label">新</div>
-      <iframe title="新"></iframe>
+      <iframe title="新" sandbox="allow-same-origin"></iframe>
       <div class="overlay"></div>
     </div>
     <div id="peek-hint">Space 長押しで旧を表示</div>

@@ -28,7 +28,7 @@ const S = {
   ws: store.get('ws', false),
   sync: store.get('sync', true),
   follow: store.get('follow', true),
-  js: store.get('js', false),
+  js: false,             // 実行許可は起動ごとに明示的に選ぶ
   list: store.get('list', true),
   expanded: new Set(),    // 展開済みの折りたたみ
   items: [],              // 描画上の変更要素
@@ -94,8 +94,9 @@ function loadFrame(p, name, version, scrollY) {
     const f = document.createElement('iframe');
     f.title = p.frame.title;
     f.className = 'loading';
+    f.setAttribute('sandbox', S.js ? 'allow-scripts' : 'allow-same-origin');
     f.addEventListener('load', () => {
-      if (scrollY) f.contentWindow.scrollTo(0, scrollY);
+      if (scrollY && !S.js) f.contentWindow.scrollTo(0, scrollY);
       const prev = p.frame;
       p.frame = f;
       f.className = '';
@@ -110,8 +111,11 @@ function loadFrame(p, name, version, scrollY) {
 }
 
 function attachFrame(p) {
-  p.win = p.frame.contentWindow;
-  p.doc = p.frame.contentDocument;
+  // JS 実行時は opaque origin に隔離するため、DOM にはアクセスしない。
+  p.win = S.js ? null : p.frame.contentWindow;
+  p.doc = S.js ? null : p.frame.contentDocument;
+  $('#opt-sync').disabled = S.js;
+  if (!p.doc) return;
   p.win.addEventListener('scroll', () => onPaneScroll(p), { passive: true });
   p.win.addEventListener('resize', scheduleDraw);
   p.doc.addEventListener('click', (e) => onFrameClick(p, e), true);
@@ -246,7 +250,15 @@ function collect(p) {
       ends[i] = list.length;
     }
   };
-  if (p.doc && p.doc.body) walk(p.doc.body);
+  if (p.doc && p.doc.body) {
+    list.push(p.doc.documentElement);
+    ends.push(0);
+    list.push(p.doc.body);
+    ends.push(0);
+    walk(p.doc.body);
+    ends[0] = list.length;
+    ends[1] = list.length;
+  }
   p.els = list;
   p.ends = ends;
   p.lines = list.map((e) => +e.getAttribute('data-hv-line') || 0);
@@ -263,6 +275,25 @@ function signature(el) {
   }
   attrs.sort();
   return el.tagName + '\u0002' + attrs.join('\u0001') + '\u0002' + text;
+}
+
+// 同じ DOM でも CSS が変わるため、使用値と要素サイズも照合する。
+// 並列ペインの端数による 1px 差はサイズ比較から除く。
+const SIZE_PROPERTIES = new Set(['width', 'height', 'inline-size', 'block-size']);
+function appearanceDiffers(oldEl, newEl) {
+  const oldWin = oldEl.ownerDocument.defaultView;
+  const newWin = newEl.ownerDocument.defaultView;
+  for (const pseudo of [null, '::before', '::after']) {
+    const a = oldWin.getComputedStyle(oldEl, pseudo);
+    const b = newWin.getComputedStyle(newEl, pseudo);
+    if (pseudo && a.content === b.content && ['none', 'normal'].includes(a.content)) continue;
+    for (const property of a) {
+      if (SIZE_PROPERTIES.has(property)) continue;
+      if (a.getPropertyValue(property) !== b.getPropertyValue(property)) return true;
+    }
+  }
+  const a = oldEl.getBoundingClientRect(), b = newEl.getBoundingClientRect();
+  return Math.abs(a.width - b.width) > 1 || Math.abs(a.height - b.height) > 1;
 }
 
 /** 最長共通部分列で対応する要素のペアを求める */
@@ -361,7 +392,13 @@ function analyze() {
       }
     }
     for (let nj = ib; nj < j; nj++) if (!used.has(nj)) addItem(pn, nj, 'add');
-    if (i < A.length) link(i, j);
+    if (i < A.length) {
+      link(i, j);
+      if (appearanceDiffers(po.els[i], pn.els[j])) {
+        addItem(po, i, 'mod');
+        addItem(pn, j, 'mod');
+      }
+    }
     ia = i + 1;
     ib = j + 1;
   }
@@ -542,7 +579,12 @@ function focusHunk(k, { scroll = true, from = null } = {}) {
     it.box.classList.toggle('cur', it.hunk === k);
     it.box.classList.remove('pulse');
   }
-  if (k < 0) { els.note.textContent = ''; return; }
+  if (k < 0) {
+    const count = S.items.filter((it) => !it.inner && it.side === 'new').length;
+    els.note.textContent = S.js ? 'JS隔離表示（DOM比較・描画連動は無効）'
+      : count ? `描画差分: ${count} 要素（ソース外のCSSなど）` : '';
+    return;
+  }
 
   for (const r of els.rows.querySelectorAll(`.row[data-h="${k}"]`)) r.classList.add('cur');
   const tick = els.rail.querySelector(`.tick[data-h="${k}"]`);
@@ -554,9 +596,9 @@ function focusHunk(k, { scroll = true, from = null } = {}) {
   const items = S.hunkItems[k] || [];
   const visible = items.filter((it) => !it.inner && isVisible(it.el));
   const count = (kind) => visible.filter((it) => it.kind === kind && it.side === (kind === 'del' ? 'old' : 'new')).length;
-  els.note.textContent = visible.length
+  els.note.textContent = S.js ? 'JS隔離表示（DOM比較・描画連動は無効）' : visible.length
     ? `描画: ${[['add', '+'], ['del', '−'], ['mod', '~']].map(([kd, s]) => count(kd) && s + count(kd)).filter(Boolean).join(' ')}`
-    : '描画上の変化なし（head・script・空白など）';
+    : '対応する要素差分なし（画像・描画内容の変化は未判定）';
 
   if (!scroll) return;
 
@@ -677,7 +719,7 @@ function buildRail() {
 
 function renderChanges() {
   const { lines, hunks } = S.data.diff;
-  if (!hunks.length) { els.changes.innerHTML = '<div class="none">差分はありません</div>'; return; }
+  if (!hunks.length) { els.changes.innerHTML = '<div class="none">ソース差分はありません</div>'; return; }
   const ins = [], del = [];
   for (const l of lines) {
     if (l.h == null) continue;
@@ -880,7 +922,7 @@ function bindToggle(id, key, onChange) {
   box.checked = S[key];
   box.addEventListener('change', () => {
     S[key] = box.checked;
-    store.set(key, box.checked);
+    if (key !== 'js') store.set(key, box.checked);
     if (onChange) onChange();
   });
   return box;
