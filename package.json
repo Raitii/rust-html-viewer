@@ -1,0 +1,6 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": { "test": "node --test tests/browser.test.mjs" },
+  "devDependencies": { "playwright": "1.61.1" }
+}

@@ -1,6 +1,7 @@
 mod diff;
 mod doc;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
@@ -80,6 +81,7 @@ struct State {
     pair: Option<Arc<Pair>>,
     stamp: (Stamp, Stamp),
     version: u64,
+    stylesheets: HashMap<PathBuf, Stamp>,
 }
 
 struct App {
@@ -88,9 +90,16 @@ struct App {
 
 impl App {
     fn new(pair: Option<Pair>) -> Self {
-        let stamp = pair.as_ref().map_or((None, None), |p| (p.old.stamp(), p.new.stamp()));
+        let stamp = pair
+            .as_ref()
+            .map_or((None, None), |p| (p.old.stamp(), p.new.stamp()));
         App {
-            state: Mutex::new(State { pair: pair.map(Arc::new), stamp, version: 0 }),
+            state: Mutex::new(State {
+                pair: pair.map(Arc::new),
+                stamp,
+                version: 0,
+                stylesheets: HashMap::new(),
+            }),
         }
     }
 
@@ -108,13 +117,33 @@ impl App {
                 st.version += 1;
             }
         }
+        let mut css_changed = false;
+        for (path, stamp) in &mut st.stylesheets {
+            let now = file_stamp(path);
+            if *stamp != now {
+                *stamp = now;
+                css_changed = true;
+            }
+        }
+        if css_changed {
+            st.version += 1;
+        }
         st.version
+    }
+
+    fn watch_stylesheet(&self, path: &Path) {
+        let mut st = self.state.lock().unwrap();
+        // 初回に読んだ時点を基準にし、更新の検出前に上書きしない。
+        st.stylesheets
+            .entry(path.to_owned())
+            .or_insert_with(|| file_stamp(path));
     }
 
     fn set_pair(&self, pair: Pair) {
         let mut st = self.state.lock().unwrap();
         st.stamp = (pair.old.stamp(), pair.new.stamp());
         st.pair = Some(Arc::new(pair));
+        st.stylesheets.clear();
         st.version += 1;
     }
 }
@@ -194,7 +223,9 @@ fn fail(msg: &str) -> ! {
 
 fn open_browser(url: &str) {
     let result = if cfg!(windows) {
-        process::Command::new("cmd").args(["/C", "start", "", url]).spawn()
+        process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
     } else if cfg!(target_os = "macos") {
         process::Command::new("open").arg(url).spawn()
     } else {
@@ -213,7 +244,8 @@ fn respond(req: Request, status: u16, content_type: &str, body: Vec<u8>, extra: 
     let mut res = Response::from_data(body)
         .with_status_code(status)
         .with_header(header("Content-Type", content_type))
-        .with_header(header("Cache-Control", "no-store"));
+        .with_header(header("Cache-Control", "no-store"))
+        .with_header(header("X-Content-Type-Options", "nosniff"));
     for h in extra {
         res = res.with_header(h);
     }
@@ -242,6 +274,47 @@ fn host_is_local(req: &Request) -> bool {
         })
 }
 
+fn api_request_allowed(headers: &[Header]) -> bool {
+    let value = |name: &'static str| {
+        headers
+            .iter()
+            .find(|h| h.field.equiv(name))
+            .map(|h| h.value.as_str())
+    };
+    let Some(host) = value("Host") else {
+        return false;
+    };
+    if let Some(origin) = value("Origin")
+        && origin != format!("http://{host}")
+    {
+        return false;
+    }
+    if let Some(site) = value("Sec-Fetch-Site")
+        && site != "same-origin"
+    {
+        return false;
+    }
+    if let Some(dest) = value("Sec-Fetch-Dest")
+        && dest != "empty"
+    {
+        return false;
+    }
+    true
+}
+
+fn file_stamp(path: &Path) -> Stamp {
+    let m = fs::metadata(path).ok()?;
+    Some((m.modified().ok()?, m.len()))
+}
+
+fn preview_policy(allow_js: bool) -> &'static str {
+    if allow_js {
+        "sandbox allow-scripts; object-src 'none'; form-action 'none'"
+    } else {
+        "sandbox allow-same-origin; script-src 'none'; object-src 'none'; form-action 'none'"
+    }
+}
+
 fn clean_path(s: &str) -> &str {
     // エクスプローラの「パスのコピー」は前後に " が付く
     s.trim().trim_matches('"').trim()
@@ -264,13 +337,25 @@ fn handle(app: &App, mut req: Request) {
             .map(|(_, v)| v.to_owned())
     };
 
-    if path.starts_with("/api/") && !host_is_local(&req) {
+    if path.starts_with("/api/") && (!host_is_local(&req) || !api_request_allowed(req.headers())) {
         return respond_json(req, 403, json!({ "error": "forbidden" }));
     }
 
     match path {
-        "/" => respond(req, 200, "text/html; charset=utf-8", INDEX_HTML.into(), vec![]),
-        "/app.js" => respond(req, 200, "text/javascript; charset=utf-8", APP_JS.into(), vec![]),
+        "/" => respond(
+            req,
+            200,
+            "text/html; charset=utf-8",
+            INDEX_HTML.into(),
+            vec![header("Content-Security-Policy", "frame-ancestors 'none'")],
+        ),
+        "/app.js" => respond(
+            req,
+            200,
+            "text/javascript; charset=utf-8",
+            APP_JS.into(),
+            vec![],
+        ),
         "/app.css" => respond(req, 200, "text/css; charset=utf-8", APP_CSS.into(), vec![]),
         "/api/version" => respond_json(req, 200, json!({ "version": app.version() })),
         "/api/diff" => {
@@ -301,6 +386,16 @@ fn handle(app: &App, mut req: Request) {
             if req.method() != &Method::Post {
                 return respond_json(req, 405, json!({ "error": "POST only" }));
             }
+            if !req.headers().iter().any(|h| {
+                h.field.equiv("Content-Type")
+                    && h.value
+                        .as_str()
+                        .split(';')
+                        .next()
+                        .is_some_and(|v| v.trim().eq_ignore_ascii_case("application/json"))
+            }) {
+                return respond_json(req, 415, json!({ "error": "application/json required" }));
+            }
             let body: Result<OpenBody, _> = serde_json::from_reader(req.as_reader());
             let result = body.map_err(|e| e.to_string()).and_then(|b| {
                 Ok(Pair {
@@ -329,9 +424,21 @@ fn handle(app: &App, mut req: Request) {
                 && let Some(pair) = app.pair()
                 && let Some(side) = pair.side(side)
             {
-                serve_doc(side, &percent_decode(rel), param("js").as_deref() == Some("1"), req);
+                serve_doc(
+                    app,
+                    side,
+                    &percent_decode(rel),
+                    param("js").as_deref() == Some("1"),
+                    req,
+                );
             } else {
-                respond(req, 404, "text/plain; charset=utf-8", b"not found".to_vec(), vec![]);
+                respond(
+                    req,
+                    404,
+                    "text/plain; charset=utf-8",
+                    b"not found".to_vec(),
+                    vec![],
+                );
             }
         }
     }
@@ -358,11 +465,15 @@ fn list_dir(dir: &str) -> Result<serde_json::Value, String> {
             }
             let is_dir = e.path().is_dir();
             let lower = name.to_ascii_lowercase();
-            (is_dir || lower.ends_with(".html") || lower.ends_with(".htm")).then_some((is_dir, name))
+            (is_dir || lower.ends_with(".html") || lower.ends_with(".htm"))
+                .then_some((is_dir, name))
         })
         .collect();
     // フォルダを先に、あとは名前順
-    entries.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase())));
+    entries.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then_with(|| a.1.to_lowercase().cmp(&b.1.to_lowercase()))
+    });
     let show = |p: &Path| {
         let s = p.display().to_string();
         s.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(s)
@@ -378,18 +489,18 @@ fn list_dir(dir: &str) -> Result<serde_json::Value, String> {
 }
 
 /// 比較対象の HTML 本体（行番号を埋め込む）と、同じフォルダにある CSS・画像などを返す。
-fn serve_doc(side: &Side, rel: &str, allow_js: bool, req: Request) {
+fn serve_doc(app: &App, side: &Side, rel: &str, allow_js: bool, req: Request) {
     let not_found = |req: Request| {
-        respond(req, 404, "text/plain; charset=utf-8", b"not found".to_vec(), vec![]);
+        respond(
+            req,
+            404,
+            "text/plain; charset=utf-8",
+            b"not found".to_vec(),
+            vec![],
+        );
     };
     // ページ自身のスクリプトは既定で止める（差分を安定させるため）
-    let csp = || {
-        if allow_js {
-            vec![]
-        } else {
-            vec![header("Content-Security-Policy", "script-src 'none'; object-src 'none'")]
-        }
-    };
+    let csp = || vec![header("Content-Security-Policy", preview_policy(allow_js))];
 
     if rel == side.name {
         match side.read() {
@@ -400,7 +511,13 @@ fn serve_doc(side: &Side, rel: &str, allow_js: bool, req: Request) {
                 doc::inject_line_attrs(&src).into_bytes(),
                 csp(),
             ),
-            Err(e) => respond(req, 500, "text/plain; charset=utf-8", e.into_bytes(), vec![]),
+            Err(e) => respond(
+                req,
+                500,
+                "text/plain; charset=utf-8",
+                e.into_bytes(),
+                vec![],
+            ),
         }
         return;
     }
@@ -422,7 +539,11 @@ fn serve_doc(side: &Side, rel: &str, allow_js: bool, req: Request) {
                 let body = doc::decode(&bytes).into_bytes();
                 respond(req, 200, "text/html; charset=utf-8", body, csp());
             } else {
-                respond(req, 200, mime(&ext), bytes, vec![]);
+                if ext == "css" {
+                    app.watch_stylesheet(&full);
+                }
+                let extra = if ext == "svg" { csp() } else { vec![] };
+                respond(req, 200, mime(&ext), bytes, extra);
             }
         }
         Err(_) => not_found(req),
@@ -459,7 +580,9 @@ fn percent_decode(s: &str) -> String {
     let mut i = 0;
     while i < b.len() {
         if b[i] == b'%'
-            && let Some(v) = s.get(i + 1..i + 3).and_then(|h| u8::from_str_radix(h, 16).ok())
+            && let Some(v) = s
+                .get(i + 1..i + 3)
+                .and_then(|h| u8::from_str_radix(h, 16).ok())
         {
             out.push(v);
             i += 3;
@@ -469,4 +592,72 @@ fn percent_decode(s: &str) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn api_accepts_viewer_and_command_line_requests() {
+        let host = header("Host", "127.0.0.1:7878");
+        assert!(api_request_allowed(std::slice::from_ref(&host)));
+        assert!(api_request_allowed(&[
+            host,
+            header("Origin", "http://127.0.0.1:7878"),
+            header("Sec-Fetch-Site", "same-origin"),
+            header("Sec-Fetch-Dest", "empty"),
+        ]));
+    }
+
+    #[test]
+    fn api_rejects_isolated_preview_and_foreign_origins() {
+        for origin in [
+            "null",
+            "http://localhost:7878",
+            "http://127.0.0.1:7879",
+            "https://example.com",
+        ] {
+            assert!(!api_request_allowed(&[
+                header("Host", "127.0.0.1:7878"),
+                header("Origin", origin),
+            ]));
+        }
+        for (name, value) in [
+            ("Sec-Fetch-Site", "cross-site"),
+            ("Sec-Fetch-Site", "same-site"),
+            ("Sec-Fetch-Dest", "iframe"),
+            ("Sec-Fetch-Dest", "script"),
+        ] {
+            assert!(!api_request_allowed(&[
+                header("Host", "127.0.0.1:7878"),
+                header(name, value)
+            ]));
+        }
+        assert!(!api_request_allowed(&[]));
+    }
+
+    #[test]
+    fn preview_never_allows_scripts_and_same_origin_together() {
+        assert!(preview_policy(true).contains("sandbox allow-scripts;"));
+        assert!(!preview_policy(true).contains("allow-same-origin"));
+        assert!(preview_policy(false).contains("sandbox allow-same-origin;"));
+        assert!(!preview_policy(false).contains("allow-scripts"));
+        assert!(preview_policy(false).contains("script-src 'none'"));
+    }
+
+    #[test]
+    fn stylesheet_changes_advance_version() {
+        let path = env::temp_dir().join(format!("html-viewer-css-test-{}.css", process::id()));
+        fs::write(&path, "h1 { color: red }").unwrap();
+        let app = App::new(None);
+        app.watch_stylesheet(&path);
+        assert_eq!(app.version(), 0);
+        fs::write(&path, "h1 { color: cornflowerblue }").unwrap();
+        app.watch_stylesheet(&path);
+        assert_eq!(app.version(), 1);
+        assert_eq!(app.version(), 1);
+        fs::remove_file(&path).unwrap();
+        assert_eq!(app.version(), 2);
+    }
 }
