@@ -58,7 +58,7 @@ button { font: inherit; color: inherit; }
   flex-wrap: wrap;
 }
 .files { display: flex; align-items: center; gap: 6px; min-width: 0; flex: 1; }
-.file {
+#bar .file {
   font-family: var(--mono);
   padding: 2px 8px;
   border-radius: 4px;
@@ -69,8 +69,8 @@ button { font: inherit; color: inherit; }
   min-width: 2.4em;
   flex: 0 1 auto;
 }
-.file.old { background: var(--del-bg); }
-.file.new { background: var(--add-bg); }
+#bar .file.old { background: var(--del-bg); }
+#bar .file.new { background: var(--add-bg); }
 .arrow { color: var(--muted); }
 .stats { font-family: var(--mono); margin-left: 6px; }
 .stats .a { color: var(--add); }
@@ -86,8 +86,16 @@ button { font: inherit; color: inherit; }
   cursor: pointer;
 }
 .nav button:hover { border-color: var(--accent); }
-#counter { font-family: var(--mono); min-width: 64px; text-align: center; font-weight: 600; }
-.note { color: var(--muted); font-size: 12px; }
+/* ▲▼を連打できるよう、カウンタと説明文は幅を固定して位置をずらさない */
+#counter { font-family: var(--mono); width: 10ch; text-align: center; font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.note {
+  color: var(--muted);
+  font-size: 12px;
+  width: 26em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
 
 .opts { display: flex; align-items: center; gap: 12px; }
 .opts label { display: flex; align-items: center; gap: 3px; cursor: pointer; user-select: none; }
@@ -407,11 +415,20 @@ body.no-list #changes { display: none; }
 .browse-bar .target { flex: none; color: var(--muted); font-size: 12px; }
 .browse-bar .target label { margin-left: 6px; cursor: pointer; }
 #ls-list { list-style: none; margin: 0; padding: 0; height: 260px; overflow: auto; }
-#ls-list li { padding: 3px 10px; cursor: pointer; font: 12px var(--mono); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-#ls-list li:hover { background: var(--bg); }
-#ls-list li.dir::before { content: "📁 "; }
-#ls-list li.file::before { content: "📄 "; }
+/* フォルダはその場で開閉するツリー。階層ごとに字下げする */
+#ls-list ul { list-style: none; margin: 0; padding: 0 0 0 16px; }
+#ls-list li { font: 12px var(--mono); }
+#ls-list .node, #ls-list li.msg { display: block; padding: 3px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#ls-list .node { cursor: pointer; }
+#ls-list .node:hover { background: var(--bg); }
+#ls-list li.dir > .node::before { content: "▸ 📁 "; }
+#ls-list li.dir.open > .node::before { content: "▾ 📂 "; }
+#ls-list li.file > .node::before { content: "　 📄 "; }
+#ls-list li.picked-old > .node { background: var(--del-bg); }
+#ls-list li.picked-new > .node { background: var(--add-bg); }
+#ls-list li.picked-old.picked-new > .node { background: linear-gradient(90deg, var(--del-bg) 50%, var(--add-bg) 50%); }
 #ls-list li.msg { color: var(--muted); cursor: default; }
+#ls-list ul > li.msg { padding-left: 32px; }
 .actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 .actions button { border: 1px solid var(--line); background: var(--bg); border-radius: 4px; padding: 5px 14px; cursor: pointer; }
 .actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }

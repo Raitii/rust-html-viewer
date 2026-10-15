@@ -647,6 +647,50 @@ mod tests {
     }
 
     #[test]
+    fn percent_decode_handles_utf8_and_broken_escapes() {
+        assert_eq!(percent_decode("%E6%97%A7%2Fa%20b.html"), "旧/a b.html");
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz%4"), "%zz%4");
+    }
+
+    #[test]
+    fn clean_path_strips_explorer_quotes() {
+        assert_eq!(clean_path(r#"  "C:\a b\x.html"  "#), r"C:\a b\x.html");
+        assert_eq!(clean_path("/tmp/x.html"), "/tmp/x.html");
+    }
+
+    #[test]
+    fn list_dir_shows_folders_first_and_only_html() {
+        let dir = env::temp_dir().join(format!("html-viewer-ls-test-{}", process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        for d in ["zeta", "Alpha", ".git"] {
+            fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        for f in ["b.HTML", "a.htm", "style.css", ".hidden.html", "C.html"] {
+            fs::write(dir.join(f), "").unwrap();
+        }
+        let v = list_dir(dir.to_str().unwrap()).unwrap();
+        let names: Vec<_> = v["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|e| {
+                format!(
+                    "{}{}",
+                    e["name"].as_str().unwrap(),
+                    if e["dir"] == true { "/" } else { "" }
+                )
+            })
+            .collect();
+        assert_eq!(names, ["Alpha/", "zeta/", "a.htm", "b.HTML", "C.html"]);
+        assert!(v["parent"].is_string());
+        assert!(!v["dir"].as_str().unwrap().starts_with(r"\\?\"));
+        assert!(list_dir(dir.join("a.htm").to_str().unwrap()).is_err());
+        assert!(list_dir(dir.join("missing").to_str().unwrap()).is_err());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn stylesheet_changes_advance_version() {
         let path = env::temp_dir().join(format!("html-viewer-css-test-{}.css", process::id()));
         fs::write(&path, "h1 { color: red }").unwrap();

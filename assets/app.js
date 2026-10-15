@@ -137,7 +137,7 @@ async function reload(reason) {
       S.version = data.version;
       S.prevText = null;
       els.counter.textContent = '–';
-      els.note.textContent = '比較するファイルが未選択です（📂 か o キーで選択）';
+      setNote('比較するファイルが未選択です（📂 か o キーで選択）');
       els.stats.textContent = '';
       els.changes.innerHTML = els.rows.innerHTML = els.rail.innerHTML = '';
       hideError();
@@ -592,6 +592,13 @@ function scrollSourceToRow(row, smooth = true) {
 //  変更（hunk）へのフォーカス：ソースと描画の両方を同時に動かす
 // ---------------------------------------------------------------------
 
+// 説明欄は幅固定で省略表示されるので、全文はツールチップでも見られるようにする
+const JS_NOTE = 'JS隔離表示（DOM比較・描画連動は無効）';
+function setNote(text) {
+  els.note.textContent = text;
+  els.note.title = text;
+}
+
 function focusHunk(k, { scroll = true, from = null } = {}) {
   const hunks = S.data ? S.data.diff.hunks : [];
   S.cur = k;
@@ -607,8 +614,8 @@ function focusHunk(k, { scroll = true, from = null } = {}) {
   }
   if (k < 0) {
     const count = S.items.filter((it) => !it.inner && it.side === 'new').length;
-    els.note.textContent = S.js ? 'JS隔離表示（DOM比較・描画連動は無効）'
-      : count ? `描画差分: ${count} 要素（ソース外のCSSなど）` : '';
+    setNote(S.js ? JS_NOTE
+      : count ? `描画差分: ${count} 要素（ソース外のCSSなど）` : '');
     return;
   }
 
@@ -622,9 +629,9 @@ function focusHunk(k, { scroll = true, from = null } = {}) {
   const items = S.hunkItems[k] || [];
   const visible = items.filter((it) => !it.inner && isVisible(it.el));
   const count = (kind) => visible.filter((it) => it.kind === kind && it.side === (kind === 'del' ? 'old' : 'new')).length;
-  els.note.textContent = S.js ? 'JS隔離表示（DOM比較・描画連動は無効）' : visible.length
+  setNote(S.js ? JS_NOTE : visible.length
     ? `描画: ${[['add', '+'], ['del', '−'], ['mod', '~']].map(([kd, s]) => count(kd) && s + count(kd)).filter(Boolean).join(' ')}`
-    : '対応する要素差分なし（画像・描画内容の変化は未判定）';
+    : '対応する要素差分なし（画像・描画内容の変化は未判定）');
 
   if (!scroll) return;
 
@@ -808,39 +815,86 @@ function openPicker() {
   (pk.old.value ? pk.new : pk.old).focus();
 }
 
+async function listDir(dir) {
+  const r = await fetch('/api/ls?dir=' + encodeURIComponent(dir));
+  const j = await r.json();
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+const joinPath = (dir, name) => (dir.endsWith(pk.sep) ? dir + name : dir + pk.sep + name);
+// Windows はパスの大文字小文字を区別しないので、選択中の印を付けるときもそろえる
+const samePath = (a, b) => (pk.sep === '\\' ? a.toLowerCase() === b.toLowerCase() : a === b);
+
+/** フォルダの中身をツリーの1階層として描く。フォルダは開くと中身を読み込む */
+function treeItems(j) {
+  if (!j.entries.length) return '<li class="msg">フォルダも HTML ファイルもありません</li>';
+  return j.entries.map((e) => {
+    const path = esc(joinPath(j.dir, e.name));
+    return e.dir
+      ? `<li class="dir" data-path="${path}"><span class="node">${esc(e.name)}</span><ul hidden></ul></li>`
+      : `<li class="file" data-path="${path}"><span class="node">${esc(e.name)}</span></li>`;
+  }).join('');
+}
+
 async function loadDir(dir) {
   try {
-    const r = await fetch('/api/ls?dir=' + encodeURIComponent(dir));
-    const j = await r.json();
-    if (!r.ok) throw new Error(j.error || r.statusText);
+    const j = await listDir(dir);
     pk.dir.value = j.dir;
     pk.parent = j.parent;
     pk.sep = j.dir.includes('\\') ? '\\' : '/';
     pk.err.textContent = '';
-    pk.list.innerHTML = j.entries.length
-      ? j.entries.map((e) => `<li class="${e.dir ? 'dir' : 'file'}" data-name="${esc(e.name)}">${esc(e.name)}</li>`).join('')
-      : '<li class="msg">フォルダも HTML ファイルもありません</li>';
+    pk.list.innerHTML = treeItems(j);
+    markPicked();
   } catch (e) {
     pk.err.textContent = e.message || String(e);
   }
 }
 
-const joinPath = (dir, name) => (dir.endsWith(pk.sep) ? dir + name : dir + pk.sep + name);
+async function toggleFolder(li) {
+  const ul = li.querySelector(':scope > ul');
+  const open = !li.classList.contains('open');
+  li.classList.toggle('open', open);
+  ul.hidden = !open;
+  if (!open || li.dataset.loaded) return;
+  li.dataset.loaded = '1';
+  try {
+    ul.innerHTML = treeItems(await listDir(li.dataset.path));
+    markPicked();
+  } catch (e) {
+    delete li.dataset.loaded;
+    ul.innerHTML = `<li class="msg">${esc(e.message || String(e))}</li>`;
+  }
+}
+
+/** 旧・新の入力欄にあるファイルをツリー上で色付けする */
+function markPicked() {
+  for (const li of pk.list.querySelectorAll('li.file')) {
+    li.classList.toggle('picked-old', samePath(li.dataset.path, pk.old.value.trim()));
+    li.classList.toggle('picked-new', samePath(li.dataset.path, pk.new.value.trim()));
+  }
+}
 
 pk.list.addEventListener('click', (e) => {
-  const li = e.target.closest('li[data-name]');
+  const li = e.target.closest('li[data-path]');
   if (!li) return;
-  const full = joinPath(pk.dir.value, li.dataset.name);
-  if (li.classList.contains('dir')) { loadDir(full); return; }
+  if (li.classList.contains('dir')) { toggleFolder(li); return; }
   const target = document.querySelector('input[name=target]:checked').value;
-  pk[target].value = full;
+  pk[target].value = li.dataset.path;
+  markPicked();
   // 旧を入れたら次は新、というふうに入力先を進める
   if (target === 'old') document.querySelector('input[name=target][value=new]').checked = true;
+});
+// フォルダのダブルクリックで、そこをツリーの起点にする
+pk.list.addEventListener('dblclick', (e) => {
+  const li = e.target.closest('li.dir[data-path]');
+  if (li) loadDir(li.dataset.path);
 });
 $('#ls-up').addEventListener('click', () => { if (pk.parent) loadDir(pk.parent); });
 pk.dir.addEventListener('keydown', (e) => { if (e.key === 'Enter') loadDir(pk.dir.value); });
 for (const k of ['old', 'new']) {
   pk[k].addEventListener('keydown', (e) => { if (e.key === 'Enter') submitPicker(); });
+  pk[k].addEventListener('input', markPicked);
   pk[k].addEventListener('focus', () => { document.querySelector(`input[name=target][value=${k}]`).checked = true; });
 }
 $('#picker-go').addEventListener('click', submitPicker);
