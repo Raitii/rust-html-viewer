@@ -94,6 +94,16 @@ test('CSS comparison, source navigation, stylesheet watching and JS isolation', 
         && it.el.tagName === 'HTML' && it.kind === 'mod')), true);
     });
 
+    await t.test('ancestors that only grow because of an added child are not marked', async () => {
+      const version = await page.evaluate(() => S.version);
+      await writeFile(path.join(after, 'style.css'), css('red'));
+      await writeFile(newer, html.replace('</body>', '<p>Added</p></body>'));
+      await page.waitForFunction((v) => S.version > v && !S.loading, version);
+      const kinds = await page.evaluate(() => S.items.filter((it) => it.side === 'new')
+        .map((it) => it.el.tagName + ':' + it.kind));
+      assert.deepEqual(kinds, ['P:add']);
+    });
+
     await t.test('JS runs without parent access or API writes', async () => {
       const script = `<script>
         document.body.dataset.executed = 'yes';

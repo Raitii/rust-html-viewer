@@ -114,22 +114,19 @@ button { font: inherit; color: inherit; }
 .pane { position: relative; background: #fff; min-width: 0; overflow: hidden; }
 .pane iframe { border: 0; width: 100%; height: 100%; display: block; background: #fff; }
 .pane iframe.loading { position: absolute; inset: 0; visibility: hidden; }
-.pane-label {
+/* 旧/新の目印: 内容を隠さないよう上端の細い色帯だけにする */
+.pane::after {
+  content: "";
   position: absolute;
-  top: 6px;
-  left: 50%;
-  transform: translateX(-50%);
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
   z-index: 3;
-  font-size: 11px;
-  font-weight: 700;
-  padding: 1px 10px;
-  border-radius: 10px;
   pointer-events: none;
-  opacity: .85;
-  color: #fff;
 }
-#pane-old .pane-label { background: var(--del); }
-#pane-new .pane-label { background: var(--add); }
+#pane-old::after { background: var(--del); }
+#pane-new::after { background: var(--add); }
 
 /* 重ね表示: 2枚を同じ位置に置き、旧は Space 長押し中だけ見せる */
 #render.single { display: block; }

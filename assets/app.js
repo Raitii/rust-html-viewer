@@ -279,21 +279,26 @@ function signature(el) {
 
 // 同じ DOM でも CSS が変わるため、使用値と要素サイズも照合する。
 // 並列ペインの端数による 1px 差はサイズ比較から除く。
+// 'style' は CSS の違い、'size' はサイズだけの違い（子孫の変更の結果かもしれない）。
 const SIZE_PROPERTIES = new Set(['width', 'height', 'inline-size', 'block-size']);
-function appearanceDiffers(oldEl, newEl) {
+// 要素サイズから計算される値。サイズが違うときはサイズ側の判定に任せる
+const SIZE_DEPENDENT = new Set(['transform-origin', 'perspective-origin']);
+function appearanceDiff(oldEl, newEl) {
   const oldWin = oldEl.ownerDocument.defaultView;
   const newWin = newEl.ownerDocument.defaultView;
+  const ra = oldEl.getBoundingClientRect(), rb = newEl.getBoundingClientRect();
+  const sameSize = ra.width === rb.width && ra.height === rb.height;
   for (const pseudo of [null, '::before', '::after']) {
     const a = oldWin.getComputedStyle(oldEl, pseudo);
     const b = newWin.getComputedStyle(newEl, pseudo);
     if (pseudo && a.content === b.content && ['none', 'normal'].includes(a.content)) continue;
     for (const property of a) {
       if (SIZE_PROPERTIES.has(property)) continue;
-      if (a.getPropertyValue(property) !== b.getPropertyValue(property)) return true;
+      if (!sameSize && SIZE_DEPENDENT.has(property)) continue;
+      if (a.getPropertyValue(property) !== b.getPropertyValue(property)) return 'style';
     }
   }
-  const a = oldEl.getBoundingClientRect(), b = newEl.getBoundingClientRect();
-  return Math.abs(a.width - b.width) > 1 || Math.abs(a.height - b.height) > 1;
+  return Math.abs(ra.width - rb.width) > 1 || Math.abs(ra.height - rb.height) > 1 ? 'size' : null;
 }
 
 /** 最長共通部分列で対応する要素のペアを求める */
@@ -373,6 +378,7 @@ function analyze() {
   };
 
   // 対応が取れなかった区間ごとに、同じタグ同士を「変更」、残りを追加/削除とする
+  const resized = [];
   let ia = 0, ib = 0;
   for (const [i, j] of [...pairs, [A.length, B.length]]) {
     const used = new Set();
@@ -394,13 +400,33 @@ function analyze() {
     for (let nj = ib; nj < j; nj++) if (!used.has(nj)) addItem(pn, nj, 'add');
     if (i < A.length) {
       link(i, j);
-      if (appearanceDiffers(po.els[i], pn.els[j])) {
+      const diff = appearanceDiff(po.els[i], pn.els[j]);
+      if (diff === 'style') {
         addItem(po, i, 'mod');
         addItem(pn, j, 'mod');
+      } else if (diff === 'size') {
+        resized.push([i, j]);
       }
     }
     ia = i + 1;
     ib = j + 1;
+  }
+
+  // サイズだけ違う要素は、内側に変更があればその結果とみなして枠を出さない
+  // （子が増えて親が伸びただけで html/body ごと「変更」になるのを防ぐ）。
+  // 文書順の逆に見ることで、子孫を先に確定させる
+  const containsChange = new Set();
+  const markAncestors = (el) => {
+    for (let a = el.parentElement; a && !containsChange.has(a); a = a.parentElement) containsChange.add(a);
+  };
+  for (const it of S.items) markAncestors(it.el);
+  for (let k = resized.length - 1; k >= 0; k--) {
+    const [i, j] = resized[k];
+    if (containsChange.has(po.els[i]) || containsChange.has(pn.els[j])) continue;
+    addItem(po, i, 'mod');
+    addItem(pn, j, 'mod');
+    markAncestors(po.els[i]);
+    markAncestors(pn.els[j]);
   }
 
   // 追加/削除された要素の内側は個別に枠を出さない（枠だらけになるのを防ぐ）
